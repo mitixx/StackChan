@@ -196,6 +196,153 @@ touch firmware/main/CMakeLists.txt
 
 ---
 
+## 追加機能 3: インターネット経由の GitHub Webhook 受信
+
+GitHub のプッシュや PR などのイベントをスタックちゃんが音声で通知する機能。
+
+### アーキテクチャ
+
+```
+GitHub (クラウド)
+    │ POST https://xxxx.trycloudflare.com/github
+    ▼
+Cloudflare Edge
+    │ (トンネル経由)
+    ▼
+Mac (cloudflared プロセス)
+    │ HTTP転送 → http://192.168.11.16:80
+    ▼
+ESP32 スタックちゃん
+    │ /github ハンドラ
+    ▼
+「GitHubから通知です」と音声再生
+```
+
+### 使用ツール
+
+| ツール | 用途 | 備考 |
+|--------|------|------|
+| `cloudflared` | Mac → インターネット間のトンネル | 認証不要・無料（Cloudflare公式） |
+| `edge-tts` | 音声ファイル生成 | Microsoft Edge TTS、`ja-JP-NanamiNeural` ボイス |
+| `ffmpeg` | MP3 → OGG/Opus 変換 | 16kHz モノラル、24kbps |
+
+### 音声ファイル生成
+
+```sh
+# Microsoft Edge TTS で「GitHubから通知です」を生成
+python3 -m edge_tts --voice ja-JP-NanamiNeural \
+    --text "GitHubから通知です" --write-media /tmp/github_notify.mp3
+
+# ESP32 用 OGG/Opus 形式に変換
+ffmpeg -y -i /tmp/github_notify.mp3 -c:a libopus -b:a 24k -ar 16000 \
+    firmware/main/assets/sfx/github.ogg
+```
+
+### 実装コード (`firmware/main/main.cpp`)
+
+```cpp
+#include "cJSON.h"
+
+// POST /github — GitHub webhook ハンドラ
+static esp_err_t github_webhook_handler(httpd_req_t *req) {
+    char event[64] = "unknown";
+    httpd_req_get_hdr_value_str(req, "X-GitHub-Event", event, sizeof(event));
+
+    // ボディ読み込み（最大 4KB）
+    const size_t BUF_SIZE = 4096;
+    char *buf = (char *)malloc(BUF_SIZE);
+    int received = 0;
+    int remaining = req->content_len < (int)BUF_SIZE - 1 ? req->content_len : (int)BUF_SIZE - 1;
+    while (remaining > 0) {
+        int ret = httpd_req_recv(req, buf + received, remaining);
+        if (ret <= 0) break;
+        received += ret;
+        remaining -= ret;
+    }
+    buf[received] = '\0';
+
+    // JSON からリポジトリ名・送信者を抽出
+    const char *repo = "unknown", *sender = "unknown";
+    cJSON *root = cJSON_Parse(buf);
+    if (root) {
+        cJSON *r = cJSON_GetObjectItem(root, "repository");
+        cJSON *s = cJSON_GetObjectItem(root, "sender");
+        if (r) repo   = cJSON_GetStringValue(cJSON_GetObjectItem(r, "full_name")) ?: repo;
+        if (s) sender = cJSON_GetStringValue(cJSON_GetObjectItem(s, "login"))     ?: sender;
+    }
+    mclog::info("GitHub event: {} | repo: {} | sender: {}", event, repo, sender);
+
+    hal_bridge::app_play_sound(OGG_GITHUB);  // 「GitHubから通知です」
+
+    if (root) cJSON_Delete(root);
+    free(buf);
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_send(req, "OK", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+}
+
+static const httpd_uri_t github_uri = {
+    .uri = "/github", .method = HTTP_POST,
+    .handler = github_webhook_handler, .user_ctx = NULL
+};
+```
+
+### `assets.h` への追加
+
+```cpp
+extern const char ogg_github_start[] asm("_binary_github_ogg_start");
+extern const char ogg_github_end[]   asm("_binary_github_ogg_end");
+static const std::string_view OGG_GITHUB{
+    static_cast<const char*>(ogg_github_start),
+    static_cast<size_t>(ogg_github_end - ogg_github_start)};
+```
+
+### トンネルの起動方法
+
+```sh
+# Cloudflare Tunnel でスタックちゃんをインターネットに公開
+cloudflared tunnel --url http://192.168.11.16:80 --no-autoupdate &
+
+# 発行された URL を確認（起動後 5〜10 秒待つ）
+# 例: https://infants-commission-clause-laid.trycloudflare.com
+```
+
+### GitHub Webhook 設定手順
+
+1. 通知したいリポジトリ → **Settings → Webhooks → Add webhook**
+2. **Payload URL**: `https://<自動発行URL>.trycloudflare.com/github`
+3. **Content type**: `application/json`
+4. **Which events**: 受信したいイベント（push / pull_request / issues など）
+5. **Active**: チェックを入れて **Add webhook** をクリック
+
+### 動作確認コマンド
+
+```sh
+# ローカル確認
+curl -X POST http://192.168.11.16/github \
+  -H "X-GitHub-Event: push" \
+  -H "Content-Type: application/json" \
+  -d '{"repository":{"full_name":"mitixx/stack-chan"},"sender":{"login":"mitixx"}}'
+
+# インターネット経由
+curl -X POST https://<URL>/github \
+  -H "X-GitHub-Event: push" \
+  -H "Content-Type: application/json" \
+  -d '{"repository":{"full_name":"mitixx/stack-chan"},"sender":{"login":"mitixx"}}'
+# → HTTP 200 / スタックちゃんが「GitHubから通知です」と発話
+```
+
+### 注意事項
+
+| 項目 | 内容 |
+|------|------|
+| URL の固定 | `trycloudflare.com` の URL は起動ごとに変わる。ngrok 有料プランか自前 Caddy リバースプロキシで固定化可能 |
+| 認証 | 現在は無認証。本番運用では `X-Hub-Signature-256` ヘッダの HMAC 検証を追加推奨 |
+| ペイロードサイズ | 現在 4KB 上限。大きなコミットセットは途中で切り捨てられる（JSON 抽出は成功する） |
+| 音声ファイル追加後 | `touch firmware/main/CMakeLists.txt` で CMake に再スキャンを強制してからビルド |
+
+---
+
 ## 主要ファイル一覧
 
 | 用途 | パス |
@@ -205,6 +352,7 @@ touch firmware/main/CMakeLists.txt
 | HAL ブリッジ API | `firmware/main/hal/board/hal_bridge.h` |
 | アセットヘッダ | `firmware/main/assets/assets.h` |
 | 効果音ファイル置き場 | `firmware/main/assets/sfx/` |
+| GitHub 通知音声 | `firmware/main/assets/sfx/github.ogg` |
 | コンポーネント依存定義 | `firmware/main/idf_component.yml` |
 | ビルド設定デフォルト | `firmware/sdkconfig.defaults` |
 | ESP-IDF ルート | `/Users/tomomi/.espressif/v5.5.4/esp-idf/` |

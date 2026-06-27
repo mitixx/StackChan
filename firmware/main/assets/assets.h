@@ -27,6 +27,12 @@ static const std::string_view OGG_HELLO{
     static_cast<const char*>(ogg_hello_start),
     static_cast<size_t>(ogg_hello_end - ogg_hello_start)};
 
+extern const char ogg_github_start[] asm("_binary_github_ogg_start");
+extern const char ogg_github_end[] asm("_binary_github_ogg_end");
+static const std::string_view OGG_GITHUB{
+    static_cast<const char*>(ogg_github_start),
+    static_cast<size_t>(ogg_github_end - ogg_github_start)};
+
 namespace assets {
 
 lv_image_dsc_t get_image(std::string_view name);
