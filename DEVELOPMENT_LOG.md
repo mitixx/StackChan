@@ -299,18 +299,31 @@ static const std::string_view OGG_GITHUB{
 
 ### トンネルの起動方法
 
-```sh
-# Cloudflare Tunnel でスタックちゃんをインターネットに公開
-cloudflared tunnel --url http://192.168.11.16:80 --no-autoupdate &
+ngrok 無料アカウントの固定ドメインを使用（URL が変わらない）。
 
-# 発行された URL を確認（起動後 5〜10 秒待つ）
-# 例: https://infants-commission-clause-laid.trycloudflare.com
+```sh
+# ngrok を固定ドメインで起動（バックグラウンド）
+ngrok http --domain=unsold-promenade-askew.ngrok-free.dev 192.168.11.16:80 &
+
+# 動作確認
+curl -s http://127.0.0.1:4040/api/tunnels | python3 -c \
+  "import sys,json; print(json.load(sys.stdin)['tunnels'][0]['public_url'])"
+```
+
+#### ngrok 初期設定（初回のみ）
+
+```sh
+# 1. アカウント作成: https://dashboard.ngrok.com/signup
+# 2. Authtoken を登録
+ngrok config add-authtoken <YOUR_AUTHTOKEN>
+# 3. 固定ドメインを発行: https://dashboard.ngrok.com/cloud-edge/domains
+#    → "Generate static domain" で取得
 ```
 
 ### GitHub Webhook 設定手順
 
 1. 通知したいリポジトリ → **Settings → Webhooks → Add webhook**
-2. **Payload URL**: `https://<自動発行URL>.trycloudflare.com/github`
+2. **Payload URL**: `https://unsold-promenade-askew.ngrok-free.dev/github`
 3. **Content type**: `application/json`
 4. **Which events**: 受信したいイベント（push / pull_request / issues など）
 5. **Active**: チェックを入れて **Add webhook** をクリック
@@ -324,8 +337,9 @@ curl -X POST http://192.168.11.16/github \
   -H "Content-Type: application/json" \
   -d '{"repository":{"full_name":"mitixx/stack-chan"},"sender":{"login":"mitixx"}}'
 
-# インターネット経由
-curl -X POST https://<URL>/github \
+# インターネット経由（固定URL）
+curl -X POST https://unsold-promenade-askew.ngrok-free.dev/github \
+  -H "ngrok-skip-browser-warning: true" \
   -H "X-GitHub-Event: push" \
   -H "Content-Type: application/json" \
   -d '{"repository":{"full_name":"mitixx/stack-chan"},"sender":{"login":"mitixx"}}'
@@ -336,7 +350,9 @@ curl -X POST https://<URL>/github \
 
 | 項目 | 内容 |
 |------|------|
-| URL の固定 | `trycloudflare.com` の URL は起動ごとに変わる。ngrok 有料プランか自前 Caddy リバースプロキシで固定化可能 |
+| 固定 URL | `https://unsold-promenade-askew.ngrok-free.dev` — ngrok 無料アカウントで永続固定 |
+| Mac 再起動後 | `ngrok http --domain=unsold-promenade-askew.ngrok-free.dev 192.168.11.16:80 &` を再実行 |
+| リクエスト確認 | `http://127.0.0.1:4040` でリクエスト内容をブラウザから確認できる |
 | 認証 | 現在は無認証。本番運用では `X-Hub-Signature-256` ヘッダの HMAC 検証を追加推奨 |
 | ペイロードサイズ | 現在 4KB 上限。大きなコミットセットは途中で切り捨てられる（JSON 抽出は成功する） |
 | 音声ファイル追加後 | `touch firmware/main/CMakeLists.txt` で CMake に再スキャンを強制してからビルド |
